@@ -56,7 +56,10 @@ RANK_LABELS: dict[str, str] = {
     "real_decreto_ley": "Real Decreto-ley",
     "real_decreto": "Real Decreto",
     "decreto": "Decreto",
+    "decreto_ley": "Decreto-ley",
+    "decreto_legislativo": "Decreto Legislativo",
     "orden": "Orden",
+    "orden_ministerial": "Orden Ministerial",
     "resolucion": "Resolución",
     "instruccion": "Instrucción",
     "circular": "Circular",
@@ -64,6 +67,10 @@ RANK_LABELS: dict[str, str] = {
     "acuerdo": "Acuerdo",
     "anuncio": "Anuncio",
     "correccion_errores": "Corrección de errores",
+    "reglamento": "Reglamento",
+    "estatuto": "Estatuto",
+    "carta": "Carta",
+    "tratado": "Tratado",
 }
 
 STOP_WORDS = {
@@ -72,6 +79,57 @@ STOP_WORDS = {
     "no", "si", "más", "sobre", "esta", "este", "ello", "como", "entre",
     "lo", "le", "les", "todo", "todos", "todas", "ha", "han", "hay", "ser",
     "fue", "son", "cual", "cuales",
+}
+
+# Legal abbreviations → expanded query terms for better recall
+ABBREVIATIONS: dict[str, str] = {
+    # Impuestos
+    "irpf": "impuesto renta personas fisicas",
+    "iva": "impuesto valor añadido",
+    "is": "impuesto sociedades",
+    "ibi": "impuesto bienes inmuebles",
+    "iae": "impuesto actividades economicas",
+    "isd": "impuesto sucesiones donaciones",
+    "ip": "impuesto patrimonio",
+    "irnr": "impuesto renta no residentes",
+    "itpajd": "impuesto transmisiones patrimoniales actos juridicos documentados",
+    # Leyes y códigos
+    "lau": "ley arrendamientos urbanos alquiler vivienda",
+    "lsc": "ley sociedades capital mercantil",
+    "trlsc": "texto refundido ley sociedades capital",
+    "et": "estatuto trabajadores laboral empleo",
+    "lgss": "ley general seguridad social pensiones",
+    "lgt": "ley general tributaria hacienda",
+    "ce": "constitucion española derechos fundamentales",
+    "cc": "codigo civil",
+    "cp": "codigo penal delito",
+    "lec": "ley enjuiciamiento civil proceso judicial",
+    "lecrim": "ley enjuiciamiento criminal penal",
+    "lgp": "ley general presupuestos generales estado",
+    "lpac": "ley procedimiento administrativo comun administracion publica",
+    "lrjsp": "regimen juridico sector publico administracion",
+    "lopd": "ley proteccion datos personales privacidad",
+    "rgpd": "reglamento general proteccion datos personales privacidad",
+    "lopdgdd": "proteccion datos garantia derechos digitales",
+    "loe": "ley organica educacion escolar",
+    "lomce": "ley organica mejora calidad educativa",
+    "lomloe": "ley organica modificacion educacion",
+    # Prestaciones / situaciones
+    "erte": "expediente regulacion temporal empleo",
+    "ere": "expediente regulacion empleo",
+    "imv": "ingreso minimo vital renta",
+    "smi": "salario minimo interprofesional",
+    "pie": "participacion ingresos estado financiacion",
+    "dana": "depresion aislada niveles altos catastrofe inundacion emergencia",
+    # Organismos
+    "aeat": "agencia tributaria hacienda",
+    "boe": "boletin oficial estado",
+    "tc": "tribunal constitucional",
+    "ts": "tribunal supremo",
+    "tjue": "tribunal justicia union europea",
+    "cedh": "convenio europeo derechos humanos",
+    "ss": "seguridad social",
+    "sepe": "servicio empleo publico estatal",
 }
 
 # ---------------------------------------------------------------------------
@@ -187,6 +245,19 @@ def _tokenise(text: str) -> List[str]:
     return [t for t in tokens if t not in STOP_WORDS and len(t) > 2]
 
 
+def _expand_query(query: str) -> str:
+    """Replace known abbreviations/acronyms with their full terms."""
+    words = query.lower().split()
+    expanded: List[str] = []
+    for word in words:
+        key = re.sub(r"[^a-záéíóúüñ]", "", word)
+        if key in ABBREVIATIONS:
+            expanded.append(ABBREVIATIONS[key])
+        else:
+            expanded.append(word)
+    return " ".join(expanded)
+
+
 def _score_doc(doc: dict, terms: List[str]) -> int:
     title = (doc.get("title") or "").lower()
     subjects = " ".join(doc.get("subjects") or []).lower()
@@ -219,7 +290,7 @@ def search(
     status_filter: str | None = None,
     limit: int = MAX_RESULTS,
 ) -> List[dict]:
-    terms = _tokenise(query)
+    terms = _tokenise(_expand_query(query))
     if not terms:
         return []
 
