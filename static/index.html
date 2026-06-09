@@ -477,6 +477,48 @@
       transition: background .15s;
     }
     .btn-outline:hover { background: var(--accent-light); }
+    .btn-primary:disabled, .btn-outline:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* Generador de documentos */
+    #ai-actions { margin-top: 14px; display: none; gap: 10px; flex-wrap: wrap; }
+    .doc-field { margin-bottom: 14px; }
+    .doc-field label {
+      display: block;
+      font-size: .82rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 5px;
+    }
+    .doc-field label .req { color: #b91c1c; }
+    .doc-field input, .doc-field textarea {
+      width: 100%;
+      padding: 9px 11px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      font-size: .9rem;
+      font-family: inherit;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .doc-field input:focus, .doc-field textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .doc-field textarea { min-height: 80px; resize: vertical; }
+    .doc-type-select { margin-bottom: 18px; }
+    .doc-type-desc { font-size: .82rem; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+    .doc-actions { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+    .doc-notice {
+      font-size: .8rem;
+      color: var(--muted);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+    .doc-result { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 16px; }
 
     /* Empty / loading states */
     .empty-state {
@@ -573,6 +615,7 @@
       Solo vigentes
     </span>
     <button class="clear-btn" id="clear-btn">Limpiar filtros</button>
+    <button class="btn-outline" id="gen-doc-btn-top" type="button" style="margin-left:auto;padding:6px 14px;font-size:.82rem;">📄 Generar documento</button>
   </div>
 </div>
 
@@ -591,6 +634,9 @@
       </div>
     </div>
     <div id="ai-answer"></div>
+    <div id="ai-actions">
+      <button class="btn-outline" id="gen-doc-btn" type="button">📄 Generar documento (solicitud, queja, recurso…)</button>
+    </div>
   </div>
 
   <!-- Results -->
@@ -607,6 +653,31 @@
     <div class="modal-meta" id="modal-meta"></div>
     <div class="modal-links" id="modal-links"></div>
     <div id="modal-content"></div>
+  </div>
+</div>
+
+<!-- Document Generator Modal -->
+<div id="doc-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto;">
+  <div id="modal" style="position:relative;">
+    <button id="doc-close" style="position:absolute;top:16px;right:16px;width:32px;height:32px;border:none;background:var(--bg);border-radius:50%;cursor:pointer;font-size:1.1rem;color:var(--muted);">✕</button>
+    <h2 style="padding-right:36px;">Generar documento</h2>
+    <div class="doc-notice">
+      Rellena los datos del escrito. El documento es un <strong>borrador</strong> generado
+      automáticamente; revísalo y consulta con un profesional antes de presentarlo.
+    </div>
+    <div class="doc-type-select">
+      <label class="doc-field" style="margin:0;">
+        <span style="font-size:.82rem;font-weight:600;display:block;margin-bottom:5px;">Tipo de documento</span>
+        <select id="doc-type" class="filter-select" style="width:100%;"></select>
+      </label>
+      <div class="doc-type-desc" id="doc-type-desc"></div>
+    </div>
+    <form id="doc-form"></form>
+    <div class="doc-actions">
+      <button class="btn-primary" id="doc-submit" type="button">Generar</button>
+      <button class="btn-outline" id="doc-cancel" type="button">Cancelar</button>
+    </div>
+    <div class="doc-result" id="doc-result" style="display:none;"></div>
   </div>
 </div>
 
@@ -640,6 +711,7 @@ async function init() {
   populateFilters();
   renderHome();
   bindEvents();
+  loadDocTypes();
 }
 
 async function pollStatus() {
@@ -752,7 +824,18 @@ function bindEvents() {
     if (e.target === document.getElementById('modal-overlay')) closeModal();
   });
   document.getElementById('modal-close').addEventListener('click', closeModal);
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); closeDocModal(); } });
+
+  // Generador de documentos
+  document.getElementById('gen-doc-btn').addEventListener('click', openDocModal);
+  document.getElementById('gen-doc-btn-top').addEventListener('click', openDocModal);
+  document.getElementById('doc-close').addEventListener('click', closeDocModal);
+  document.getElementById('doc-cancel').addEventListener('click', closeDocModal);
+  document.getElementById('doc-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('doc-overlay')) closeDocModal();
+  });
+  document.getElementById('doc-type').addEventListener('change', renderDocForm);
+  document.getElementById('doc-submit').addEventListener('click', submitDoc);
 }
 
 function clearFilters() {
@@ -931,10 +1014,102 @@ function renderAIAnswer(q, answer) {
   document.getElementById('ai-question-label').textContent = q;
   document.getElementById('ai-answer').textContent = answer;
   document.getElementById('ai-panel').classList.add('visible');
+  document.getElementById('ai-actions').style.display = 'flex';
 }
 
 function hideAI() {
   document.getElementById('ai-panel').classList.remove('visible');
+  document.getElementById('ai-actions').style.display = 'none';
+}
+
+// -------------------------------------------------------------------
+// Generador de documentos
+// -------------------------------------------------------------------
+let docTypes = [];
+
+async function loadDocTypes() {
+  try {
+    const res = await fetch('/api/doc-types');
+    const data = await res.json();
+    docTypes = data.types || [];
+    const sel = document.getElementById('doc-type');
+    sel.innerHTML = docTypes.map(t => `<option value="${t.id}">${escHtml(t.label)}</option>`).join('');
+  } catch { /* el botón seguirá, pero sin tipos */ }
+}
+
+function openDocModal() {
+  document.getElementById('doc-result').style.display = 'none';
+  renderDocForm();
+  document.getElementById('doc-overlay').style.display = 'flex';
+}
+
+function closeDocModal() {
+  document.getElementById('doc-overlay').style.display = 'none';
+}
+
+function renderDocForm() {
+  const typeId = document.getElementById('doc-type').value || (docTypes[0] && docTypes[0].id);
+  const t = docTypes.find(x => x.id === typeId);
+  if (!t) return;
+  document.getElementById('doc-type-desc').textContent = t.description || '';
+
+  // Prerrellena el asunto con la última pregunta a la IA, si la hay.
+  const lastQ = document.getElementById('ai-question-label').textContent || '';
+
+  document.getElementById('doc-form').innerHTML = t.fields.map(f => {
+    const req = f.required ? ' <span class="req">*</span>' : '';
+    const prefill = (f.name === 'asunto' && lastQ) ? escAttr(lastQ) : '';
+    const control = f.multiline
+      ? `<textarea name="${f.name}"></textarea>`
+      : `<input type="text" name="${f.name}" value="${prefill}">`;
+    return `<div class="doc-field"><label>${escHtml(f.label)}${req}</label>${control}</div>`;
+  }).join('');
+}
+
+async function submitDoc() {
+  const typeId = document.getElementById('doc-type').value;
+  const form = document.getElementById('doc-form');
+  const datos = {};
+  form.querySelectorAll('input, textarea').forEach(el => { datos[el.name] = el.value.trim(); });
+
+  const btn = document.getElementById('doc-submit');
+  btn.disabled = true;
+  btn.textContent = 'Generando…';
+  const resultBox = document.getElementById('doc-result');
+  resultBox.style.display = 'block';
+  resultBox.innerHTML = '<div class="ai-loading"><div class="spinner"></div>Redactando y compilando…</div>';
+
+  try {
+    const res = await fetch('/api/generar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ doc_type: typeId, datos, use_ai: hasAI }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      resultBox.innerHTML = `<p style="color:#b91c1c;font-size:.85rem;">${escHtml(err.detail || 'Error al generar el documento.')}</p>`;
+      return;
+    }
+    const data = await res.json();
+    const links = [`<a class="btn-outline" href="/api/generar/${data.doc_id}.tex" target="_blank">⬇︎ Descargar .tex (LaTeX)</a>`];
+    if (data.pdf_available) {
+      links.unshift(`<a class="btn-primary" href="/api/generar/${data.doc_id}.pdf" target="_blank">⬇︎ Descargar PDF</a>`);
+    }
+    const aiNote = data.used_ai
+      ? 'Redacción asistida por IA con la normativa encontrada.'
+      : 'Documento generado con tus datos (sin redacción IA).';
+    const pdfNote = data.pdf_available ? '' :
+      '<p style="font-size:.8rem;color:var(--muted);margin-top:8px;">No se pudo compilar el PDF en el servidor; descarga el .tex y compílalo con XeLaTeX.</p>';
+    resultBox.innerHTML = `
+      <p style="font-size:.85rem;color:var(--text);margin-bottom:6px;font-weight:600;">✓ Documento generado</p>
+      <p style="font-size:.8rem;color:var(--muted);margin-bottom:12px;">${aiNote}</p>
+      <div class="modal-links">${links.join('')}</div>${pdfNote}`;
+  } catch {
+    resultBox.innerHTML = '<p style="color:#b91c1c;font-size:.85rem;">Error de red al generar el documento.</p>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generar';
+  }
 }
 
 // -------------------------------------------------------------------

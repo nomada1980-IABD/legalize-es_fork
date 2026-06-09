@@ -1,1 +1,18 @@
 __pycache__/
+*.pyc
+
+# Entorno virtual
+lawProject/
+venv/
+.venv/
+
+# Secretos / configuración local
+.env
+.env.*
+
+# Artefactos generados
+/tmp/legalize_index.json
+legalize_docs/
+*.aux
+*.log
+*.out

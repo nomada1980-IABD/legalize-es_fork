@@ -20,6 +20,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import documents
+import llm
+
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
@@ -317,60 +320,44 @@ def search(
 # ---------------------------------------------------------------------------
 
 async def ask_claude(question: str, docs: List[dict]) -> str | None:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
+    if not llm.available():
         return None
 
-    try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=api_key)
-
-        context_parts: List[str] = []
-        for i, doc in enumerate(docs[:6], 1):
-            subjects = ", ".join(doc.get("subjects") or [])
-            context_parts.append(
-                f"[{i}] {doc.get('title', 'Sin título')}\n"
-                f"    ID: {doc.get('identifier', '')}\n"
-                f"    Tipo: {RANK_LABELS.get(doc.get('rank', ''), doc.get('rank', ''))}\n"
-                f"    Fecha: {doc.get('publication_date', '')}\n"
-                f"    Estado: {'Vigente' if doc.get('status') == 'in_force' else doc.get('status', '')}\n"
-                f"    Departamento: {doc.get('department', '')}\n"
-                f"    Materias: {subjects}\n"
-                f"    Fuente: {doc.get('source', '')}\n\n"
-                f"    {doc.get('_preview', '')}\n"
-            )
-
-        context = "\n---\n".join(context_parts)
-
-        system_prompt = (
-            "Eres un asistente jurídico especializado en legislación española. "
-            "Tu misión es ayudar a ciudadanos, empresas y profesionales a entender "
-            "la normativa vigente de forma clara y práctica. "
-            "Responde siempre en español. Cita los identificadores BOE cuando los menciones. "
-            "Si la información no está en los documentos proporcionados, indícalo. "
-            "Sé conciso pero completo. Usa listas cuando sea útil."
+    context_parts: List[str] = []
+    for i, doc in enumerate(docs[:6], 1):
+        subjects = ", ".join(doc.get("subjects") or [])
+        context_parts.append(
+            f"[{i}] {doc.get('title', 'Sin título')}\n"
+            f"    ID: {doc.get('identifier', '')}\n"
+            f"    Tipo: {RANK_LABELS.get(doc.get('rank', ''), doc.get('rank', ''))}\n"
+            f"    Fecha: {doc.get('publication_date', '')}\n"
+            f"    Estado: {'Vigente' if doc.get('status') == 'in_force' else doc.get('status', '')}\n"
+            f"    Departamento: {doc.get('department', '')}\n"
+            f"    Materias: {subjects}\n"
+            f"    Fuente: {doc.get('source', '')}\n\n"
+            f"    {doc.get('_preview', '')}\n"
         )
 
-        user_message = (
-            f"Pregunta: {question}\n\n"
-            f"Documentos legislativos relevantes encontrados en la base de datos:\n\n"
-            f"{context}\n\n"
-            "Por favor responde la pregunta basándote en estos documentos. "
-            "Indica al final las referencias BOE utilizadas."
-        )
+    context = "\n---\n".join(context_parts)
 
-        message = client.messages.create(
-            model="claude-opus-4-8",
-            max_tokens=1500,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        )
+    system_prompt = (
+        "Eres un asistente jurídico especializado en legislación española. "
+        "Tu misión es ayudar a ciudadanos, empresas y profesionales a entender "
+        "la normativa vigente de forma clara y práctica. "
+        "Responde siempre en español. Cita los identificadores BOE cuando los menciones. "
+        "Si la información no está en los documentos proporcionados, indícalo. "
+        "Sé conciso pero completo. Usa listas cuando sea útil."
+    )
 
-        return message.content[0].text
+    user_message = (
+        f"Pregunta: {question}\n\n"
+        f"Documentos legislativos relevantes encontrados en la base de datos:\n\n"
+        f"{context}\n\n"
+        "Por favor responde la pregunta basándote en estos documentos. "
+        "Indica al final las referencias BOE utilizadas."
+    )
 
-    except Exception as exc:
-        return f"⚠️ Error al consultar la IA: {exc}"
+    return llm.complete(system_prompt, user_message, max_tokens=1500)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +376,13 @@ class QueryRequest(BaseModel):
     status: Optional[str] = None
 
 
+class DocRequest(BaseModel):
+    doc_type: str
+    datos: dict
+    use_ai: bool = True
+    context_query: Optional[str] = None
+
+
 @app.get("/", response_class=FileResponse)
 def root():
     return FileResponse(str(REPO_PATH / "static" / "index.html"))
@@ -401,7 +395,8 @@ def api_status():
         "ready": ready,
         "total_docs": len(_index) if ready else _index_loaded,
         "total_files": _index_total,
-        "has_ai": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "has_ai": llm.available(),
+        "ai_provider": llm.provider(),
         "regions": REGIONS,
         "ranks": RANK_LABELS,
     }
@@ -479,6 +474,61 @@ def api_doc(identifier: str):
                 return _serialise(doc)
 
     raise HTTPException(status_code=404, detail="Documento no encontrado.")
+
+
+# ---------------------------------------------------------------------------
+# Generación de documentos
+# ---------------------------------------------------------------------------
+
+@app.get("/api/doc-types")
+def api_doc_types():
+    """Catálogo de tipos de documento generables y sus campos."""
+    return {
+        "has_pdf": documents.LATEX_ENGINE is not None,
+        "has_ai": llm.available(),
+        "types": documents.doc_types_catalog(),
+    }
+
+
+@app.post("/api/generar")
+async def api_generar(req: DocRequest):
+    if req.doc_type not in documents.DOC_TYPES:
+        raise HTTPException(status_code=400, detail="Tipo de documento no válido.")
+
+    cfg = documents.DOC_TYPES[req.doc_type]
+    faltan = [
+        f["label"] for f in cfg["fields"]
+        if f.get("required") and not str(req.datos.get(f["name"], "")).strip()
+    ]
+    if faltan:
+        raise HTTPException(
+            status_code=422,
+            detail="Faltan campos obligatorios: " + ", ".join(faltan),
+        )
+
+    ai_sections = None
+    if req.use_ai and llm.available():
+        query = req.context_query or req.datos.get("asunto") or req.datos.get("hechos", "")
+        normativa = search(query, limit=8) if _index_ready.is_set() and query else []
+        ai_sections = await documents.draft_with_claude(req.doc_type, req.datos, normativa)
+
+    result = documents.generate(req.doc_type, req.datos, ai_sections)
+    return result
+
+
+@app.get("/api/generar/{doc_id}.{fmt}")
+def api_download(doc_id: str, fmt: str):
+    if fmt not in ("tex", "pdf"):
+        raise HTTPException(status_code=400, detail="Formato no válido.")
+    path = documents.file_path(doc_id, fmt)
+    if not path:
+        raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    media = "application/pdf" if fmt == "pdf" else "application/x-tex"
+    return FileResponse(
+        str(path),
+        media_type=media,
+        filename=f"documento.{fmt}",
+    )
 
 
 # ---------------------------------------------------------------------------
